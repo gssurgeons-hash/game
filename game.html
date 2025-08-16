@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini Platformer — 100 Levels</title>
+  <style>
+    /* Simple reset */
+    html,body{height:100%;margin:0;background:linear-gradient(#87CEFA,#BFEAF5);font-family:Inter,system-ui,Arial}
+    #gameWrap{display:flex;flex-direction:column;align-items:center;padding:12px}
+    canvas{background:linear-gradient(#9ee,#cfe);box-shadow:0 8px 20px rgba(0,0,0,0.25);border-radius:8px}
+    .hud{width:800px;display:flex;justify-content:space-between;align-items:center;margin:8px 0;color:#222}
+    .hud .left{display:flex;gap:12px;align-items:center}
+    .coin{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(255,255,255,0.8);border-radius:20px}
+    .lives{display:flex;gap:6px}
+    .btns{font-size:13px;color:#444}
+    .credits{margin-top:8px;color:#222;opacity:0.8;font-size:13px}
+    @media(max-width:860px){.hud,canvas{width:95%}}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div class="hud">
+      <div class="left">
+        <div class="coin">🪙 <span id="coinCount">00</span></div>
+        <div class="lives" id="lives">❤️❤️❤️</div>
+      </div>
+      <div class="btns">Use ← → or A D to move, Space to jump</div>
+      <div id="message">Level 1 / 100</div>
+    </div>
+    <canvas id="game" width="800" height="360" tabindex="0"></canvas>
+    <div class="credits">A simple HTML5 platformer — click the canvas and use the keys. Refresh to restart.</div>
+  </div>
+
+<script>
+// ========== Basic game constants ==========
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+let keys = {};
+
+// HUD
+const coinCountEl = document.getElementById('coinCount');
+const livesEl = document.getElementById('lives');
+const messageEl = document.getElementById('message');
+
+// world camera offset
+let cameraX = 0;
+
+// ========== Player ==========
+const player = {
+  x: 120, y: 200, w: 36, h: 48,
+  vx:0, vy:0, speed:2.4, jumpPower:7.6,
+  grounded:false, facing:1, lives:3,
+  invuln:0
+};
+
+// ========== Physics ==========
+const gravity = 0.36;
+const frictionGround = 0.82;
+
+// ========== LEVEL SYSTEM ==========
+const TOTAL_LEVELS = 100;
+let levels = [];
+
+// helper to deep-clone objects (fallback if structuredClone isn't present)
+function deepClone(obj){
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// create one level with offset and difficulty based on index
+function makeLevel(i){
+  const offset = i * 3000; // spacing so each level occupies its zone
+  const difficulty = Math.min(5, Math.floor(i/20)+1); // 1..5
+
+  // base platforms
+  let plats = [
+    {x:0+offset,y:300,w:400,h:64},
+    {x:520+offset,y:260,w:220,h:20},
+    {x:780+offset,y:220,w:140,h:20},
+    {x:1050+offset,y:300,w:400,h:64}
+  ];
+
+  // add more platforms depending on difficulty
+  const extraCount = 2 + difficulty; // more platforms later
+  for(let p=0;p<extraCount;p++){
+    const px = offset + 600 + p * (250 + Math.random()*300);
+    const py = 180 + Math.random()*120;
+    const pw = 80 + Math.random()*220;
+    plats.push({x:px, y:py, w:pw, h:20});
+  }
+
+  // coins - fewer as difficulty increases
+  const coinCount = 14 - Math.min(8, difficulty*2);
+  let coinsArr = [];
+  for(let c=0;c<coinCount;c++){
+    const cx = offset + 160 + c*140 + (c%3)*20 + (Math.random()*40-20);
+    const cy = 180 + ((c%2)? -40 : 0) + (Math.random()*30-15);
+    coinsArr.push({x:cx, y:cy, r:10, c:false});
+  }
+
+  // enemies - more and faster with difficulty
+  let enemiesArr = [];
+  const enemyCount = 1 + Math.floor(difficulty * 1.2);
+  for(let e=0;e<enemyCount;e++){
+    const baseX = offset + 600 + e*400 + (Math.random()*200);
+    const speed = 0.9 + difficulty*0.4 + Math.random()*0.6;
+    enemiesArr.push({
+      x: baseX,
+      y: 236,
+      w: 34,
+      h: 28,
+      vx: speed,
+      dir: 1,
+      min: baseX - 80,
+      max: baseX + 140
+    });
+  }
+
+  // flag at the end of level area
+  const flagObj = {x: offset + 2500, y: 236, w: 16, h: 64, reached: false};
+
+  return {platforms: plats, coins: coinsArr, enemies: enemiesArr, flag: flagObj};
+}
+
+// generate levels
+for(let i=0;i<TOTAL_LEVELS;i++){
+  levels.push(makeLevel(i));
+}
+
+// ========== CURRENT LEVEL ==========
+let currentLevel = 0;
+
+// world data that will be swapped each level
+let platforms = [];
+let coins = [];
+let enemies = [];
+let flag = {x:0,y:0,w:0,h:0,reached:false};
+
+// helper to load a level into world
+function loadLevel(idx){
+  const lvl = (typeof structuredClone === 'function') ? structuredClone(levels[idx]) : deepClone(levels[idx]);
+  platforms = lvl.platforms;
+  coins = lvl.coins;
+  enemies = lvl.enemies;
+  flag = lvl.flag;
+  // reset player position and state
+  player.x = 120;
+  player.y = 200;
+  player.vx = 0;
+  player.vy = 0;
+  player.grounded = false;
+  player.invuln = 0;
+  levelComplete = false;
+  cameraX = 0;
+  coinCountEl.textContent = score.toString().padStart(2,'0');
+  livesEl.innerHTML = '❤️'.repeat(player.lives) + '🤍'.repeat(Math.max(0,3-player.lives));
+  messageEl.textContent = `Level ${currentLevel+1} / ${TOTAL_LEVELS}`;
+}
+
+// ========== Game state ==========
+let score = 0;
+let gameOver = false;
+let levelComplete = false;
+
+// initialize first level
+loadLevel(currentLevel);
+
+// ========== Input ==========
+window.addEventListener('keydown',e=>{
+  const k = e.key.toLowerCase();
+  keys[k]=true;
+  if(['arrowup',' '].includes(k)) e.preventDefault();
+});
+window.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+canvas.addEventListener('mousedown',()=>canvas.focus());
+
+// ========== Helpers ==========
+function rectsOverlap(a,b){
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+// ========== Game functions ==========
+function update(){
+  if(gameOver || levelComplete) return;
+
+  // Player input
+  let move = 0;
+  if(keys['arrowleft'] || keys['a']) move -= 1;
+  if(keys['arrowright']|| keys['d']) move += 1;
+
+  if(move !== 0){
+    player.vx += move * 0.34;
+    player.facing = move>0?1:-1;
+  } else {
+    player.vx *= 0.88; // air/ground damping
+  }
+
+  // Jump
+  if((keys[' '] || keys['arrowup'] || keys['w']) && player.grounded){
+    player.vy = -player.jumpPower; player.grounded=false;
+  }
+
+  // apply gravity
+  player.vy += gravity;
+  // limit speeds
+  player.vx = clamp(player.vx, -8, 8);
+  player.vy = clamp(player.vy, -18, 30);
+
+  // move
+  player.x += player.vx;
+  player.y += player.vy;
+
+  // simple ground collision with platforms
+  player.grounded = false;
+  for(const p of platforms){
+    const plat = {x:p.x, y:p.y, w:p.w, h:p.h};
+    if(player.x + player.w > plat.x && player.x < plat.x + plat.w){
+      if(player.y + player.h > plat.y && player.y + player.h < plat.y + plat.h + 30 && player.vy >= 0){
+        player.y = plat.y - player.h;
+        player.vy = 0;
+        player.grounded = true;
+      }
+    }
+  }
+
+  // simple wall/ceiling check / fall off
+  if(player.y > 2000){ // fell off
+    hurtPlayer();
+  }
+
+  // coins collection
+  for(const c of coins){
+    if(!c.c){
+      const coinRect = {x:c.x- c.r, y:c.y - c.r, w:c.r*2, h:c.r*2};
+      if(rectsOverlap(player, coinRect)){
+        c.c = true; score += 1;
+        coinCountEl.textContent = score.toString().padStart(2,'0');
+      }
+    }
+  }
+
+  // enemies movement + collisions
+  for(const e of enemies){
+    e.x += e.vx * e.dir;
+    if(e.x < e.min) e.dir = 1;
+    if(e.x > e.max) e.dir = -1;
+
+    const enemyRect = {x:e.x, y:e.y, w:e.w, h:e.h};
+    if(!player.invuln && rectsOverlap(player, enemyRect)){
+      // if player is falling onto enemy -> stomp
+      if(player.vy > 0 && player.y + player.h - player.vy < e.y + 6){
+        player.vy = -6; score += 2;
+        // remove enemy
+        e.x = e.min - 2000; e.vx = 0;
+      } else {
+        hurtPlayer();
+      }
+    }
+  }
+
+  // flag check
+  if(!flag.reached && player.x + player.w > flag.x){
+    flag.reached = true;
+    levelComplete = true;
+    messageEl.textContent = 'Level Complete! 🎉';
+    setTimeout(nextLevel, 900);
+  }
+
+  // camera follows player
+  cameraX = player.x - 200;
+  if(cameraX < 0) cameraX = 0;
+
+  // invuln timer
+  if(player.invuln > 0) player.invuln -= 1;
+}
+
+function hurtPlayer(){
+  player.invuln = 90; // frames of invulnerability
+  player.lives -= 1;
+  livesEl.innerHTML = '❤️'.repeat(Math.max(0,player.lives)) + '🤍'.repeat(Math.max(0,3-player.lives));
+  player.x = Math.max(50, player.x - 120);
+  player.vx = -4;
+  player.vy = -6;
+  if(player.lives <= 0){
+    gameOver = true;
+    messageEl.textContent = 'Game Over — Refresh to try again';
+  }
+}
+
+// ========== Level progression ==========
+function nextLevel(){
+  // increment and load next
+  currentLevel++;
+  if(currentLevel >= TOTAL_LEVELS){
+    messageEl.textContent = '🏆 You finished all 100 levels! Refresh to play again';
+    gameOver = true;
+    return;
+  }
+  // carry over score and lives, but reset flag reached for new level
+  if(flag) flag.reached = false;
+  loadLevel(currentLevel);
+}
+
+// ========== Rendering ==========
+function draw(){
+  // clear
+  ctx.clearRect(0,0,W,H);
+
+  ctx.save();
+  ctx.translate(-cameraX,0);
+
+  // background hills (simple parallax)
+  drawHills();
+
+  // platforms
+  for(const p of platforms){
+    drawPlatform(p.x,p.y,p.w,p.h);
+  }
+
+  // coins
+  for(const c of coins){
+    if(!c.c) drawCoin(c.x,c.y,c.r);
+  }
+
+  // enemies
+  for(const e of enemies){
+    drawEnemy(e.x,e.y,e.w,e.h);
+  }
+
+  // flag
+  drawFlag(flag.x, flag.y);
+
+  // player (simple rounded hero)
+  drawPlayer(player.x, player.y, player.w, player.h, player.invuln>0);
+
+  ctx.restore();
+}
+
+function drawHills(){
+  ctx.fillStyle = '#BFEBDC';
+  ctx.beginPath(); ctx.ellipse(400,240,260,90,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(900,240,260,90,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(1600,240,380,120,0,0,Math.PI*2); ctx.fill();
+}
+
+function drawPlatform(x,y,w,h){
+  ctx.fillStyle = '#7BBF56';
+  ctx.fillRect(x,y-8,w,8);
+  ctx.fillStyle = '#A24A2A';
+  roundRect(ctx,x,y,w,h,6,true,false);
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  for(let i=0;i<6;i++){
+    const sx = x + (i*(w/6)) + 8;
+    const sy = y + 8 + (i%2?6:2);
+    ctx.fillRect(sx,sy,20,10);
+  }
+}
+
+function drawCoin(x,y,r){
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = '#FFD24A'; ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle='#E0A91A'; ctx.stroke();
+  ctx.restore();
+}
+
+function drawEnemy(x,y,w,h){
+  ctx.save();
+  ctx.fillStyle = '#0b0b0b';
+  roundRect(ctx,x,y,w,h,6,true,false);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x+6,y+6,10,6);
+  ctx.restore();
+}
+
+function drawFlag(x,y){
+  ctx.fillStyle = '#E0C05A';
+  ctx.fillRect(x-6,y-40,6,40);
+  ctx.fillStyle = '#ffb74d';
+  ctx.beginPath(); ctx.moveTo(x,y-36); ctx.lineTo(x+34,y-24); ctx.lineTo(x,y-16); ctx.closePath(); ctx.fill();
+}
+
+function drawPlayer(x,y,w,h,inv){
+  ctx.save();
+  ctx.translate(x + w/2, y + h/2);
+  if(inv){ ctx.globalAlpha = 0.35 + 0.65*Math.sin(Date.now()/60); }
+  ctx.fillStyle = '#FFB347';
+  roundRect(ctx, -w/2, -h/2, w, h, 8, true, false);
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(-6,-6,6,6,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(8,-6,6,6,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000'; ctx.fillRect(-9,-4,4,4); ctx.fillRect(7,-4,4,4);
+  ctx.beginPath(); ctx.arc(0,4,8,0,Math.PI); ctx.strokeStyle='#8B3E00'; ctx.lineWidth=2; ctx.stroke();
+  ctx.restore();
+}
+
+// helper: rounded rect
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  if(w<2*r) r=w/2; if(h<2*r) r=h/2;
+  ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  if(fill) ctx.fill(); if(stroke) ctx.stroke();
+}
+
+// ========== Game loop ==========
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// initialize HUD
+coinCountEl.textContent = '00';
+livesEl.innerHTML = '❤️❤️❤️';
+messageEl.textContent = `Level ${currentLevel+1} / ${TOTAL_LEVELS}`;
+
+// start
+loop();
+
+</script>
+</body>
+</html>
